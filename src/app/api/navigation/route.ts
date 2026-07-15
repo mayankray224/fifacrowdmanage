@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { findShortestPath, stadiumFacilities, transitOptions } from "@/lib/ai/stadiumData";
+import { hasPromptInjection, sanitizeOutput } from "@/features/shared/securityUtils";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 
@@ -36,7 +37,7 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     
-    // Validate inputs via Zod (OWASP A03:2021 validation)
+    // 1. Zod input validation validation
     const result = NavigationQuerySchema.safeParse({
       start: searchParams.get("start"),
       end: searchParams.get("end"),
@@ -53,11 +54,18 @@ export async function GET(request: Request) {
 
     const { start, end, accessible, language } = result.data;
 
-    // Compute route path using Dijkstra
+    // 2. Prompt Injection filtering
+    if (hasPromptInjection(start) || hasPromptInjection(end)) {
+      return NextResponse.json(
+        { error: "Security filter: Invalid or dangerous input tokens detected." },
+        { status: 400 }
+      );
+    }
+
+    // Dijkstra graph navigation computations
     const path = findShortestPath(start, end, accessible);
     const estimatedMinutes = accessible ? path.length * 2.2 : path.length * 1.5;
 
-    // Retrieve active facilities and transit rates
     const facilitiesOnRoute = stadiumFacilities.filter(f => path.includes(f.location));
     const transitInfo = transitOptions[start] || [];
 
@@ -97,7 +105,7 @@ Estimated walking time: ${estimatedMinutes} minutes.`,
       }
     }
 
-    // Fallback translations dictionary
+    // Local Dictionary fallback logic
     if (!descriptiveGuide) {
       const isCongested = defaultSections.some(s => path.includes(s.name) && s.status === "CONGESTED");
       const waterRefill = facilitiesOnRoute.find(f => f.type === "WATER")?.name || "";
@@ -143,20 +151,24 @@ Estimated walking time: ${estimatedMinutes} minutes.`,
       }
     }
 
+    // 3. Output Sanitization to block XSS and prompt leaks
+    const cleanDescriptiveGuide = sanitizeOutput(descriptiveGuide);
+
     return NextResponse.json({
       start,
       end,
       accessible,
       path,
       estimatedMinutes,
-      descriptiveGuide,
+      descriptiveGuide: cleanDescriptiveGuide,
       facilitiesOnRoute,
       transitInfo,
     });
   } catch (error) {
     console.error("Critical navigation route failure:", error);
+    // Generic error message returned to block details leaking
     return NextResponse.json(
-      { error: "Internal Server Error in Navigation API." },
+      { error: "A processing error occurred. Please try again." },
       { status: 500 }
     );
   }
