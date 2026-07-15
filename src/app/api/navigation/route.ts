@@ -1,9 +1,23 @@
 import { NextResponse } from "next/server";
 import { findShortestPath, stadiumFacilities, transitOptions } from "@/lib/ai/stadiumData";
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || "",
+});
+
+const NavigationQuerySchema = z.object({
+  start: z.string().min(3).max(100).transform(val => val.replace(/<[^>]*>/g, "").trim()),
+  end: z.string().min(3).max(100).transform(val => val.replace(/<[^>]*>/g, "").trim()),
+  accessible: z.preprocess(
+    (val) => val === "true" || val === true,
+    z.boolean()
+  ),
+  language: z.enum([
+    "English", "Spanish", "French", "Arabic", 
+    "Portuguese", "German", "Japanese", "Hindi", "Hinglish"
+  ]).default("English"),
 });
 
 const defaultSections = [
@@ -21,20 +35,32 @@ const defaultSections = [
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const start = searchParams.get("start") || "Gate B (South Entrance)";
-    const end = searchParams.get("end") || "Section 104 (Access Seating)";
-    const accessible = searchParams.get("accessible") === "true";
-    const language = searchParams.get("language") || "English";
+    
+    // Validate inputs via Zod (OWASP A03:2021 validation)
+    const result = NavigationQuerySchema.safeParse({
+      start: searchParams.get("start"),
+      end: searchParams.get("end"),
+      accessible: searchParams.get("accessible"),
+      language: searchParams.get("language") || "English",
+    });
 
-    // Compute route using Dijkstra pathfinder with RAG metadata
+    if (!result.success) {
+      return NextResponse.json(
+        { error: "Invalid query parameters.", details: result.error.format() },
+        { status: 400 }
+      );
+    }
+
+    const { start, end, accessible, language } = result.data;
+
+    // Compute route path using Dijkstra
     const path = findShortestPath(start, end, accessible);
     const estimatedMinutes = accessible ? path.length * 2.2 : path.length * 1.5;
 
-    // Retrieve active facilities and carbon metrics
+    // Retrieve active facilities and transit rates
     const facilitiesOnRoute = stadiumFacilities.filter(f => path.includes(f.location));
     const transitInfo = transitOptions[start] || [];
 
-    // Call GenAI to build descriptive path guidance
     let descriptiveGuide = "";
     const isApiKeyConfigured = process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== "your_anthropic_api_key_here";
 
@@ -71,7 +97,7 @@ Estimated walking time: ${estimatedMinutes} minutes.`,
       }
     }
 
-    // Fallback translations support for 8 languages (CWE-248 resilience)
+    // Fallback translations dictionary
     if (!descriptiveGuide) {
       const isCongested = defaultSections.some(s => path.includes(s.name) && s.status === "CONGESTED");
       const waterRefill = facilitiesOnRoute.find(f => f.type === "WATER")?.name || "";

@@ -1,4 +1,10 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const DispatchSchema = z.object({
+  volunteerId: z.string().min(5).max(50).transform(val => val.replace(/<[^>]*>/g, "").trim()),
+  taskDetails: z.string().min(5).max(500).transform(val => val.replace(/<[^>]*>/g, "").trim()),
+});
 
 // Module level state holding active dispatches and incidents
 const activeDispatches: any[] = [];
@@ -25,14 +31,17 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { volunteerId, taskDetails } = body;
-
-    if (!volunteerId || !taskDetails) {
+    
+    // Parse body via Zod schemas (OWASP parameters check)
+    const result = DispatchSchema.safeParse(body);
+    if (!result.success) {
       return NextResponse.json(
-        { error: "volunteerId and taskDetails are required" },
+        { error: "Invalid dispatch data.", details: result.error.format() },
         { status: 400 }
       );
     }
+
+    const { volunteerId, taskDetails } = result.data;
 
     const newDispatch = {
       id: "dsp_" + Math.random().toString(36).substr(2, 9),
@@ -43,7 +52,7 @@ export async function POST(request: Request) {
       updatedAt: new Date().toISOString(),
       volunteer: {
         id: volunteerId,
-        name: `Volunteer Unit ${volunteerId.split("_")[1] || volunteerId}`,
+        name: `Responder Unit #${volunteerId.split("_v")[1] || "101"}`,
         email: `${volunteerId}@worldcup.com`,
         role: "VOLUNTEER",
       },
